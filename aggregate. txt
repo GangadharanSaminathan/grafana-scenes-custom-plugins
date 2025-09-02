@@ -1,0 +1,739 @@
+// connection-manager-aggregates.ts - MongoConnectionManager with Aggregation Functions
+
+import { MongoClient, MongoClientOptions, Db, Collection, AggregateOptions, AggregationCursor } from 'mongodb';
+import { ConnectionConfig, ConnectionState, Document } from './types';
+import { MongoRetryHandler } from './retry-handler';
+import { TypeSafeHelpers } from './type-safe-helpers';
+
+/**
+ * Enhanced MongoConnectionManager with built-in aggregation functions
+ */
+export class MongoConnectionManager {
+  private state: ConnectionState;
+  private readonly config: ConnectionConfig;
+  private retryHandler: MongoRetryHandler;
+
+  constructor(config: ConnectionConfig) {
+    this.config = config;
+    this.state = {
+      isConnected: false,
+      client: null,
+      database: null,
+      connectionAttempts: 0,
+      lastConnectionTime: null,
+      lastError: null
+    };
+
+    // Initialize retry handler for aggregation operations
+    this.retryHandler = new MongoRetryHandler({
+      maxRetries: 3,
+      baseDelay: 1000,
+      onRetry: async (error, context) => {
+        console.log(`🔄 Aggregation retry ${context.attempt}: ${error.message}`);
+      }
+    });
+  }
+
+  async connect(): Promise<{ client: MongoClient; database: Db }> {
+    if (this.state.isConnected && this.state.client && this.state.database) {
+      return { client: this.state.client, database: this.state.database };
+    }
+
+    const clientOptions: MongoClientOptions = {
+      serverSelectionTimeoutMS: 10000,
+      connectTimeoutMS: 10000,
+      retryReads: true,
+      retryWrites: true,
+      ...this.config.options
+    };
+
+    const client = new MongoClient(this.config.uri, clientOptions);
+    await client.connect();
+    await client.db('admin').admin().ping();
+
+    const database = this.config.databaseName 
+      ? client.db(this.config.databaseName)
+      : client.db();
+
+    this.state = {
+      isConnected: true,
+      client,
+      database,
+      connectionAttempts: 1,
+      lastConnectionTime: Date.now(),
+      lastError: null
+    };
+
+    console.log('✅ MongoDB connected successfully');
+    return { client, database };
+  }
+
+  async disconnect(): Promise<void> {
+    if (this.state.client) {
+      await this.state.client.close();
+      this.state.isConnected = false;
+      console.log('✅ MongoDB disconnected');
+    }
+  }
+
+  getCollection<T extends Document>(name: string): Collection<T> {
+    if (!this.state.database) {
+      throw new Error('Not connected to MongoDB');
+    }
+    return this.state.database.collection<T>(name);
+  }
+
+  getDatabase(): Db {
+    if (!this.state.database) {
+      throw new Error('Not connected to MongoDB');
+    }
+    return this.state.database;
+  }
+
+  /**
+   * Execute aggregation with retry logic and performance monitoring
+   */
+  async aggregate<T = any>(
+    collectionName: string,
+    pipeline: any[],
+    options: AggregateOptions = {}
+  ): Promise<T[]> {
+    const collection = this.getCollection(collectionName);
+    
+    const defaultOptions: AggregateOptions = {
+      allowDiskUse: true,
+      maxTimeMS: 30000,
+      ...options
+    };
+
+    return await this.executeAggregationWithRetry<T>(
+      collection,
+      pipeline,
+      defaultOptions
+    );
+  }
+
+  /**
+   * Aggregation: Count documents with grouping
+   */
+  async aggregateCount(
+    collectionName: string,
+    groupBy: string,
+    matchFilter: any = {}
+  ): Promise<Array<{ _id: any; count: number }>> {
+    const pipeline = [
+      ...(Object.keys(matchFilter).length > 0 ? [{ $match: matchFilter }] : []),
+      {
+        $group: {
+          _id: `$${groupBy}`,
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { count: -1 } }
+    ];
+
+    return await this.aggregate(collectionName, pipeline);
+  }
+
+  /**
+   * Aggregation: Sum values by group
+   */
+  async aggregateSum(
+    collectionName: string,
+    groupBy: string,
+    sumField: string,
+    matchFilter: any = {}
+  ): Promise<Array<{ _id: any; total: number; count: number; average: number }>> {
+    const pipeline = [
+      ...(Object.keys(matchFilter).length > 0 ? [{ $match: matchFilter }] : []),
+      {
+        $group: {
+          _id: `$${groupBy}`,
+          total: { $sum: `$${sumField}` },
+          count: { $sum: 1 },
+          average: { $avg: `$${sumField}` },
+          min: { $min: `$${sumField}` },
+          max: { $max: `$${sumField}` }
+        }
+      },
+      { $sort: { total: -1 } }
+    ];
+
+    return await this.aggregate(collectionName, pipeline);
+  }
+
+  /**
+   * Aggregation: Time-based grouping (daily, monthly, yearly)
+   */
+  async aggregateByTime(
+    collectionName: string,
+    dateField: string,
+    groupBy: 'day' | 'month' | 'year' = 'day',
+    valueField?: string,
+    matchFilter: any = {}
+  ): Promise<Array<{ _id: string; count: number; total?: number; average?: number }>> {
+    const dateFormat = {
+      day: '%Y-%m-%d',
+      month: '%Y-%m',
+      year: '%Y'
+    };
+
+    const pipeline = [
+      ...(Object.keys(matchFilter).length > 0 ? [{ $match: matchFilter }] : []),
+      {
+        $group: {
+          _id: {
+            $dateToString: {
+              format: dateFormat[groupBy],
+              date: `$${dateField}`
+            }
+          },
+          count: { $sum: 1 },
+          ...(valueField ? {
+            total: { $sum: `$${valueField}` },
+            average: { $avg: `$${valueField}` }
+          } : {})
+        }
+      },
+      { $sort: { _id: 1 } }
+    ];
+
+    return await this.aggregate(collectionName, pipeline);
+  }
+
+  /**
+   * Aggregation: Advanced lookup with filtering
+   */
+  async aggregateWithLookup<T = any>(
+    fromCollection: string,
+    lookupConfig: {
+      from: string;
+      localField: string;
+      foreignField: string;
+      as: string;
+      pipeline?: any[];
+    },
+    matchFilter: any = {},
+    projectFields?: Record<string, any>
+  ): Promise<T[]> {
+    const pipeline = [
+      ...(Object.keys(matchFilter).length > 0 ? [{ $match: matchFilter }] : []),
+      {
+        $lookup: {
+          from: lookupConfig.from,
+          localField: lookupConfig.localField,
+          foreignField: lookupConfig.foreignField,
+          as: lookupConfig.as,
+          ...(lookupConfig.pipeline ? { pipeline: lookupConfig.pipeline } : {})
+        }
+      },
+      ...(projectFields ? [{ $project: projectFields }] : [])
+    ];
+
+    return await this.aggregate<T>(fromCollection, pipeline);
+  }
+
+  /**
+   * Aggregation: Top N results
+   */
+  async aggregateTopN<T = any>(
+    collectionName: string,
+    sortField: string,
+    limit: number = 10,
+    sortOrder: 1 | -1 = -1,
+    matchFilter: any = {},
+    projectFields?: Record<string, any>
+  ): Promise<T[]> {
+    const pipeline = [
+      ...(Object.keys(matchFilter).length > 0 ? [{ $match: matchFilter }] : []),
+      { $sort: { [sortField]: sortOrder } },
+      { $limit: limit },
+      ...(projectFields ? [{ $project: projectFields }] : [])
+    ];
+
+    return await this.aggregate<T>(collectionName, pipeline);
+  }
+
+  /**
+   * Aggregation: Statistical analysis
+   */
+  async aggregateStats(
+    collectionName: string,
+    field: string,
+    groupBy?: string,
+    matchFilter: any = {}
+  ): Promise<Array<{
+    _id: any;
+    count: number;
+    sum: number;
+    average: number;
+    min: number;
+    max: number;
+    stdDeviation: number;
+  }>> {
+    const pipeline = [
+      ...(Object.keys(matchFilter).length > 0 ? [{ $match: matchFilter }] : []),
+      {
+        $group: {
+          _id: groupBy ? `$${groupBy}` : null,
+          count: { $sum: 1 },
+          sum: { $sum: `$${field}` },
+          average: { $avg: `$${field}` },
+          min: { $min: `$${field}` },
+          max: { $max: `$${field}` },
+          stdDeviation: { $stdDevSamp: `$${field}` }
+        }
+      },
+      { $sort: { average: -1 } }
+    ];
+
+    return await this.aggregate(collectionName, pipeline);
+  }
+
+  /**
+   * Aggregation: Text search with scoring
+   */
+  async aggregateTextSearch<T = any>(
+    collectionName: string,
+    searchTerm: string,
+    limit: number = 20,
+    additionalFilters: any = {}
+  ): Promise<T[]> {
+    const pipeline = [
+      {
+        $match: {
+          $text: { $search: searchTerm },
+          ...additionalFilters
+        }
+      },
+      {
+        $addFields: {
+          searchScore: { $meta: 'textScore' }
+        }
+      },
+      { $sort: { searchScore: -1 } },
+      { $limit: limit }
+    ];
+
+    return await this.aggregate<T>(collectionName, pipeline);
+  }
+
+  /**
+   * Aggregation: Faceted search (multiple groupings)
+   */
+  async aggregateFaceted(
+    collectionName: string,
+    facets: Record<string, any[]>,
+    matchFilter: any = {}
+  ): Promise<Record<string, any[]>> {
+    const pipeline = [
+      ...(Object.keys(matchFilter).length > 0 ? [{ $match: matchFilter }] : []),
+      { $facet: facets }
+    ];
+
+    const result = await this.aggregate(collectionName, pipeline);
+    return result[0] || {};
+  }
+
+  /**
+   * Aggregation: Geospatial near query
+   */
+  async aggregateNear(
+    collectionName: string,
+    coordinates: [number, number], // [longitude, latitude]
+    maxDistanceMeters: number,
+    limit: number = 50
+  ): Promise<Array<{ _id: any; distance: number; [key: string]: any }>> {
+    const pipeline = [
+      {
+        $geoNear: {
+          near: { type: 'Point', coordinates },
+          distanceField: 'distance',
+          maxDistance: maxDistanceMeters,
+          spherical: true
+        }
+      },
+      { $limit: limit }
+    ];
+
+    return await this.aggregate(collectionName, pipeline);
+  }
+
+  /**
+   * Aggregation: Time series with window functions
+   */
+  async aggregateTimeSeries(
+    collectionName: string,
+    timeField: string,
+    valueField: string,
+    windowSize: number = 7,
+    matchFilter: any = {}
+  ): Promise<Array<{
+    _id: string;
+    value: number;
+    movingAverage: number;
+    previousValue: number;
+    growthRate: number;
+  }>> {
+    const pipeline = [
+      ...(Object.keys(matchFilter).length > 0 ? [{ $match: matchFilter }] : []),
+      {
+        $group: {
+          _id: {
+            $dateToString: { format: '%Y-%m-%d', date: `$${timeField}` }
+          },
+          value: { $sum: `$${valueField}` }
+        }
+      },
+      { $sort: { _id: 1 } },
+      {
+        $setWindowFields: {
+          sortBy: { _id: 1 },
+          output: {
+            movingAverage: {
+              $avg: '$value',
+              window: { range: [-(windowSize - 1), 0], unit: 'position' }
+            },
+            previousValue: {
+              $shift: { output: '$value', by: -1 }
+            }
+          }
+        }
+      },
+      {
+        $addFields: {
+          growthRate: {
+            $cond: [
+              { $gt: ['$previousValue', 0] },
+              {
+                $multiply: [
+                  { $divide: [
+                    { $subtract: ['$value', '$previousValue'] },
+                    '$previousValue'
+                  ]},
+                  100
+                ]
+              },
+              0
+            ]
+          }
+        }
+      }
+    ];
+
+    return await this.aggregate(collectionName, pipeline);
+  }
+
+  /**
+   * Aggregation: Custom pipeline with retry
+   */
+  async aggregateCustom<T = any>(
+    collectionName: string,
+    pipeline: any[],
+    options: AggregateOptions & { 
+      retries?: number; 
+      retryDelay?: number;
+      explain?: boolean;
+    } = {}
+  ): Promise<T[]> {
+    const { retries = 3, retryDelay = 1000, explain = false, ...aggregateOptions } = options;
+    
+    // Performance analysis if requested
+    if (explain) {
+      const collection = this.getCollection(collectionName);
+      const explainResult = await collection.aggregate(pipeline).explain('executionStats');
+      console.log('📊 Aggregation Performance:', {
+        executionTimeMs: explainResult.executionStats?.executionTimeMillis,
+        totalDocsExamined: explainResult.executionStats?.totalDocsExamined,
+        totalDocsReturned: explainResult.executionStats?.totalDocsReturned
+      });
+    }
+
+    return await this.aggregate<T>(collectionName, pipeline, aggregateOptions);
+  }
+
+  /**
+   * Aggregation: Bulk aggregation operations
+   */
+  async aggregateBulk(operations: Array<{
+    name: string;
+    collection: string;
+    pipeline: any[];
+    options?: AggregateOptions;
+  }>): Promise<Record<string, any[]>> {
+    console.log(`📊 Running ${operations.length} bulk aggregation operations...`);
+    
+    const results: Record<string, any[]> = {};
+    
+    // Execute operations in parallel with controlled concurrency
+    const concurrency = 3;
+    for (let i = 0; i < operations.length; i += concurrency) {
+      const batch = operations.slice(i, i + concurrency);
+      
+      const batchPromises = batch.map(async (op) => {
+        try {
+          const result = await this.aggregate(op.collection, op.pipeline, op.options);
+          return { name: op.name, result };
+        } catch (error) {
+          console.error(`❌ Bulk aggregation failed for ${op.name}:`, error);
+          return { name: op.name, result: [], error: error.message };
+        }
+      });
+      
+      const batchResults = await Promise.all(batchPromises);
+      batchResults.forEach(({ name, result }) => {
+        results[name] = result;
+      });
+    }
+    
+    console.log(`✅ Bulk aggregation completed: ${Object.keys(results).length} operations`);
+    return results;
+  }
+
+  /**
+   * Private helper: Execute aggregation with retry logic
+   */
+  private async executeAggregationWithRetry<T>(
+    collection: Collection<any>,
+    pipeline: any[],
+    options: AggregateOptions
+  ): Promise<T[]> {
+    let attempt = 0;
+    const maxRetries = 3;
+    let lastError: any;
+
+    while (attempt < maxRetries) {
+      try {
+        console.log(`📊 Executing aggregation (attempt ${attempt + 1}/${maxRetries})...`);
+        
+        const startTime = Date.now();
+        const cursor: AggregationCursor<T> = collection.aggregate<T>(pipeline, options);
+        const results = await cursor.toArray();
+        const duration = Date.now() - startTime;
+        
+        console.log(`✅ Aggregation completed: ${results.length} results in ${duration}ms`);
+        return results;
+        
+      } catch (error) {
+        lastError = error;
+        attempt++;
+        
+        console.error(`❌ Aggregation attempt ${attempt} failed:`, error.message);
+        
+        if (attempt < maxRetries) {
+          const delay = Math.pow(2, attempt) * 1000;
+          console.log(`⏳ Retrying aggregation in ${delay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
+    }
+
+    throw new Error(`Aggregation failed after ${maxRetries} attempts: ${lastError?.message}`);
+  }
+
+  /**
+   * Get aggregation performance statistics
+   */
+  async getAggregationStats(
+    collectionName: string,
+    pipeline: any[]
+  ): Promise<{
+    executionTimeMs: number;
+    docsExamined: number;
+    docsReturned: number;
+    indexesUsed: string[];
+    stages: Array<{ stage: string; timeMs: number }>;
+  }> {
+    const collection = this.getCollection(collectionName);
+    
+    const explainResult = await collection.aggregate(pipeline).explain('executionStats');
+    
+    return {
+      executionTimeMs: explainResult.executionStats?.executionTimeMillis || 0,
+      docsExamined: explainResult.executionStats?.totalDocsExamined || 0,
+      docsReturned: explainResult.executionStats?.totalDocsReturned || 0,
+      indexesUsed: explainResult.executionStats?.indexesUsed || [],
+      stages: explainResult.stages?.map((stage: any, index: number) => ({
+        stage: Object.keys(stage)[0],
+        timeMs: stage.executionTimeMillisEstimate || 0
+      })) || []
+    };
+  }
+}
+
+/**
+ * Usage Examples
+ */
+export class AggregationExamples {
+  
+  static async demonstrateAggregations(): Promise<void> {
+    console.log('🚀 Demonstrating MongoConnectionManager Aggregation Functions...\n');
+    
+    const connectionManager = new MongoConnectionManager({
+      uri: 'mongodb://localhost:27017',
+      databaseName: 'aggregation_demo'
+    });
+
+    try {
+      await connectionManager.connect();
+
+      console.log('=== 1. COUNT AGGREGATION ===');
+      const countResults = await connectionManager.aggregateCount(
+        'orders',
+        'status',
+        { orderDate: { $gte: new Date('2024-01-01') } }
+      );
+      console.log('Order counts by status:', countResults);
+
+      console.log('\n=== 2. SUM AGGREGATION ===');
+      const sumResults = await connectionManager.aggregateSum(
+        'orders',
+        'userId',
+        'total',
+        { status: 'completed' }
+      );
+      console.log('Revenue by user:', sumResults.slice(0, 3));
+
+      console.log('\n=== 3. TIME-BASED AGGREGATION ===');
+      const timeResults = await connectionManager.aggregateByTime(
+        'orders',
+        'orderDate',
+        'month',
+        'total',
+        { status: 'completed' }
+      );
+      console.log('Monthly sales:', timeResults);
+
+      console.log('\n=== 4. LOOKUP AGGREGATION ===');
+      const lookupResults = await connectionManager.aggregateWithLookup(
+        'users',
+        {
+          from: 'orders',
+          localField: '_id',
+          foreignField: 'userId',
+          as: 'orders',
+          pipeline: [
+            { $match: { status: 'completed' } },
+            { $project: { total: 1, orderDate: 1 } }
+          ]
+        },
+        { status: 'active' },
+        {
+          name: 1,
+          email: 1,
+          totalOrders: { $size: '$orders' },
+          totalSpent: { $sum: '$orders.total' }
+        }
+      );
+      console.log('Users with order data:', lookupResults.slice(0, 2));
+
+      console.log('\n=== 5. TOP N AGGREGATION ===');
+      const topResults = await connectionManager.aggregateTopN(
+        'products',
+        'price',
+        5,
+        -1,
+        { inStock: { $gt: 0 } },
+        { name: 1, price: 1, category: 1 }
+      );
+      console.log('Top 5 most expensive products:', topResults);
+
+      console.log('\n=== 6. STATISTICAL AGGREGATION ===');
+      const statsResults = await connectionManager.aggregateStats(
+        'orders',
+        'total',
+        'status'
+      );
+      console.log('Order statistics by status:', statsResults);
+
+      console.log('\n=== 7. FACETED AGGREGATION ===');
+      const facetResults = await connectionManager.aggregateFaceted(
+        'products',
+        {
+          byCategory: [
+            { $group: { _id: '$category', count: { $sum: 1 } } },
+            { $sort: { count: -1 } }
+          ],
+          byPriceRange: [
+            {
+              $bucket: {
+                groupBy: '$price',
+                boundaries: [0, 50, 100, 500, 1000],
+                default: 'Over 1000',
+                output: { count: { $sum: 1 }, avgPrice: { $avg: '$price' } }
+              }
+            }
+          ],
+          inStockSummary: [
+            {
+              $group: {
+                _id: null,
+                totalProducts: { $sum: 1 },
+                inStockProducts: { $sum: { $cond: [{ $gt: ['$inStock', 0] }, 1, 0] } },
+                totalStockValue: { $sum: { $multiply: ['$inStock', '$price'] } }
+              }
+            }
+          ]
+        }
+      );
+      console.log('Faceted analysis:', {
+        categories: facetResults.byCategory?.length,
+        priceRanges: facetResults.byPriceRange?.length,
+        summary: facetResults.inStockSummary?.[0]
+      });
+
+      console.log('\n=== 8. TIME SERIES AGGREGATION ===');
+      const timeSeriesResults = await connectionManager.aggregateTimeSeries(
+        'orders',
+        'orderDate',
+        'total',
+        7,
+        { status: 'completed' }
+      );
+      console.log('Daily sales with trends:', timeSeriesResults.slice(-7));
+
+      console.log('\n=== 9. BULK AGGREGATION ===');
+      const bulkResults = await connectionManager.aggregateBulk([
+        {
+          name: 'userStats',
+          collection: 'users',
+          pipeline: [
+            { $group: { _id: '$country', count: { $sum: 1 } } },
+            { $sort: { count: -1 } }
+          ]
+        },
+        {
+          name: 'productStats',
+          collection: 'products',
+          pipeline: [
+            { $group: { _id: '$category', count: { $sum: 1 }, avgPrice: { $avg: '$price' } } }
+          ]
+        },
+        {
+          name: 'salesSummary',
+          collection: 'orders',
+          pipeline: [
+            { $match: { status: 'completed' } },
+            { $group: { _id: null, total: { $sum: '$total' }, count: { $sum: 1 } } }
+          ]
+        }
+      ]);
+      
+      console.log('Bulk aggregation results:', {
+        userStats: bulkResults.userStats?.length || 0,
+        productStats: bulkResults.productStats?.length || 0,
+        salesSummary: bulkResults.salesSummary?.[0]
+      });
+
+      console.log('\n🎉 All aggregation demonstrations completed successfully!');
+
+    } catch (error) {
+      console.error('❌ Error running aggregation examples:', error);
+    } finally {
+      await connectionManager.disconnect();
+    }
+  }
+}
+
+// Export for easy usage
+export { MongoConnectionManager as EnhancedMongoConnectionManager, AggregationExamples };
