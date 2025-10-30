@@ -1,0 +1,430 @@
+Here's a complete working example of implementing custom CSS injection for adding a "NEW" badge in the Grafana sidenav:
+Full Scenario: Custom CSS Injection for Sidenav Badge
+Step 1: Project Structure
+my-app-plugin/
+├── src/
+│   ├── components/
+│   │   └── App.tsx                 // Main app component
+│   ├── pages/
+│   │   └── AnalyticsPage.tsx      // Analytics page scene
+│   ├── module.ts                   // Plugin entry point
+│   └── plugin.json                 // Plugin configuration
+├── package.json
+└── ...
+Step 2: Configure plugin.json
+{
+  "$schema": "https://raw.githubusercontent.com/grafana/grafana/master/docs/sources/developers/plugins/plugin.schema.json",
+  "type": "app",
+  "name": "My Analytics App",
+  "id": "myorg-analytics-app",
+  "info": {
+    "description": "Advanced analytics dashboard",
+    "author": {
+      "name": "Your Org",
+      "url": "https://yourorg.com"
+    },
+    "keywords": ["analytics", "dashboard"],
+    "logos": {
+      "small": "img/logo.svg",
+      "large": "img/logo.svg"
+    },
+    "version": "1.0.0",
+    "updated": "2025-10-30"
+  },
+  "includes": [
+    {
+      "type": "page",
+      "name": "Overview",
+      "path": "overview",
+      "role": "Viewer",
+      "addToNav": true,
+      "defaultNav": true
+    },
+    {
+      "type": "page",
+      "name": "Analytics",
+      "path": "analytics",
+      "role": "Viewer",
+      "addToNav": true
+    },
+    {
+      "type": "page",
+      "name": "Reports",
+      "path": "reports",
+      "role": "Viewer",
+      "addToNav": true
+    }
+  ],
+  "dependencies": {
+    "grafanaDependency": ">=10.0.0",
+    "plugins": []
+  }
+}
+Step 3: Create the Main App Component with CSS Injection
+src/components/App.tsx
+import React, { useEffect } from 'react';
+import { AppRootProps } from '@grafana/data';
+import { PluginPropsContext, useSceneApp } from '@grafana/scenes';
+import { getSceneApp } from '../scenes/SceneApp';
+import { css } from '@emotion/css';
+
+export const App: React.FC<AppRootProps> = (props) => {
+  const scene = useSceneApp(getSceneApp);
+
+  useEffect(() => {
+    // Inject custom CSS for sidenav badges
+    const styleId = 'custom-sidenav-badges';
+    
+    // Check if style already exists to prevent duplicates
+    if (!document.getElementById(styleId)) {
+      const style = document.createElement('style');
+      style.id = styleId;
+      style.textContent = `
+        /* Add NEW badge after Analytics menu item */
+        a[href*="/a/${props.meta.id}/analytics"]::after,
+        a[aria-label="Analytics"]::after {
+          content: "NEW";
+          display: inline-block;
+          margin-left: 8px;
+          padding: 2px 6px;
+          font-size: 10px;
+          font-weight: 600;
+          line-height: 1;
+          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+          color: white;
+          border-radius: 3px;
+          vertical-align: middle;
+          animation: pulse 2s ease-in-out infinite;
+        }
+
+        /* Add star icon before Analytics menu item */
+        a[href*="/a/${props.meta.id}/analytics"]::before,
+        a[aria-label="Analytics"]::before {
+          content: "⭐";
+          margin-right: 6px;
+          font-size: 14px;
+        }
+
+        /* Add different badge for Reports */
+        a[href*="/a/${props.meta.id}/reports"]::after,
+        a[aria-label="Reports"]::after {
+          content: "BETA";
+          display: inline-block;
+          margin-left: 8px;
+          padding: 2px 6px;
+          font-size: 10px;
+          font-weight: 600;
+          line-height: 1;
+          background: #FFB800;
+          color: #1a1a1a;
+          border-radius: 3px;
+          vertical-align: middle;
+        }
+
+        /* Pulse animation for NEW badge */
+        @keyframes pulse {
+          0%, 100% {
+            opacity: 1;
+            transform: scale(1);
+          }
+          50% {
+            opacity: 0.8;
+            transform: scale(1.05);
+          }
+        }
+
+        /* Hover effects */
+        a[href*="/a/${props.meta.id}/analytics"]:hover::after {
+          background: linear-gradient(135deg, #764ba2 0%, #667eea 100%);
+        }
+
+        a[href*="/a/${props.meta.id}/reports"]:hover::after {
+          background: #FFA000;
+        }
+
+        /* Dark theme adjustments */
+        [data-theme="dark"] a[href*="/a/${props.meta.id}/reports"]::after {
+          background: #FFB800;
+          color: #1a1a1a;
+        }
+
+        /* Light theme adjustments */
+        [data-theme="light"] a[href*="/a/${props.meta.id}/analytics"]::after {
+          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+          color: white;
+        }
+      `;
+      
+      document.head.appendChild(style);
+      console.log('Custom sidenav styles injected');
+    }
+
+    // Cleanup function to remove styles when component unmounts
+    return () => {
+      const existingStyle = document.getElementById(styleId);
+      if (existingStyle) {
+        document.head.removeChild(existingStyle);
+        console.log('Custom sidenav styles removed');
+      }
+    };
+  }, [props.meta.id]); // Re-run if plugin ID changes
+
+  return (
+    <PluginPropsContext.Provider value={props}>
+      <div className={containerStyles}>
+        <scene.Component model={scene} />
+      </div>
+    </PluginPropsContext.Provider>
+  );
+};
+
+const containerStyles = css`
+  width: 100%;
+  height: 100%;
+`;
+Step 4: Create Scene App Structure
+src/scenes/SceneApp.tsx
+import { SceneApp, SceneAppPage } from '@grafana/scenes';
+import { getOverviewScene } from './OverviewScene';
+import { getAnalyticsScene } from './AnalyticsScene';
+import { getReportsScene } from './ReportsScene';
+
+export function getSceneApp() {
+  return new SceneApp({
+    pages: [
+      new SceneAppPage({
+        title: 'Overview',
+        titleIcon: 'apps',
+        url: '/a/myorg-analytics-app/overview',
+        getScene: getOverviewScene,
+      }),
+      new SceneAppPage({
+        title: 'Analytics',
+        titleIcon: 'chart-line',
+        subTitle: 'Advanced data analysis',
+        url: '/a/myorg-analytics-app/analytics',
+        getScene: getAnalyticsScene,
+      }),
+      new SceneAppPage({
+        title: 'Reports',
+        titleIcon: 'file-alt',
+        subTitle: 'Generate and view reports',
+        url: '/a/myorg-analytics-app/reports',
+        getScene: getReportsScene,
+      }),
+    ],
+  });
+}
+Step 5: Create Analytics Scene
+src/scenes/AnalyticsScene.tsx
+import {
+  EmbeddedScene,
+  SceneFlexLayout,
+  SceneFlexItem,
+  PanelBuilders,
+  SceneQueryRunner,
+  SceneTimeRange,
+  SceneReactObject,
+} from '@grafana/scenes';
+import { Badge, Icon, Stack, Alert } from '@grafana/ui';
+import React from 'react';
+
+export function getAnalyticsScene() {
+  const queryRunner = new SceneQueryRunner({
+    datasource: {
+      type: 'prometheus',
+      uid: 'prometheus-uid', // Replace with your datasource
+    },
+    queries: [
+      {
+        refId: 'A',
+        expr: 'rate(http_requests_total[5m])',
+      },
+    ],
+  });
+
+  return new EmbeddedScene({
+    $timeRange: new SceneTimeRange({ from: 'now-6h', to: 'now' }),
+    $data: queryRunner,
+    body: new SceneFlexLayout({
+      direction: 'column',
+      children: [
+        // NEW feature banner
+        new SceneFlexItem({
+          height: 'auto',
+          body: new SceneReactObject({
+            component: () => (
+              <Alert
+                title="New Feature!"
+                severity="info"
+                style={{ marginBottom: 16 }}
+              >
+                <Stack gap={2} direction="column">
+                  <Stack gap={1} alignItems="center">
+                    <Icon name="star" size="lg" />
+                    <span style={{ fontWeight: 500 }}>
+                      Welcome to our brand new Analytics dashboard!
+                    </span>
+                  </Stack>
+                  <span>
+                    Explore advanced metrics, custom visualizations, and
+                    real-time insights.
+                  </span>
+                </Stack>
+              </Alert>
+            ),
+          }),
+        }),
+
+        // Main content panels
+        new SceneFlexItem({
+          minHeight: 300,
+          body: PanelBuilders.timeseries()
+            .setTitle('Request Rate')
+            .setData(queryRunner)
+            .build(),
+        }),
+
+        new SceneFlexItem({
+          minHeight: 300,
+          body: PanelBuilders.stat()
+            .setTitle('Total Requests')
+            .setData(queryRunner)
+            .build(),
+        }),
+      ],
+    }),
+  });
+}
+Step 6: Create Module Entry Point
+src/module.ts
+import { AppPlugin } from '@grafana/data';
+import { App } from './components/App';
+
+export const plugin = new AppPlugin<{}>().setRootPage(App);
+Step 7: Advanced CSS Variations
+Alternative Badge Styles (add to the style.textContent in App.tsx):
+/* Option 1: Dot indicator */
+a[href*="/a/myorg-analytics-app/analytics"]::after {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 8px;
+  background: #FF4444;
+  border-radius: 50%;
+  animation: blink 1.5s ease-in-out infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* Option 2: Gradient badge with icon */
+a[href*="/a/myorg-analytics-app/analytics"]::after {
+  content: "✨ NEW";
+  display: inline-block;
+  margin-left: 8px;
+  padding: 3px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  background: linear-gradient(90deg, #FF6B6B 0%, #FFE66D 100%);
+  color: #1a1a1a;
+  border-radius: 12px;
+  box-shadow: 0 2px 4px rgba(255, 107, 107, 0.3);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* Option 3: Minimalist badge */
+a[href*="/a/myorg-analytics-app/analytics"]::after {
+  content: "N";
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  background: #3478FF;
+  color: white;
+  border-radius: 50%;
+}
+
+/* Option 4: Ribbon style */
+a[href*="/a/myorg-analytics-app/analytics"] {
+  position: relative;
+}
+
+a[href*="/a/myorg-analytics-app/analytics"]::after {
+  content: "NEW";
+  position: absolute;
+  right: -10px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 2px 6px;
+  font-size: 9px;
+  font-weight: 600;
+  background: #FF4081;
+  color: white;
+  border-radius: 3px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+Step 8: Dynamic Badge Based on Time
+Time-limited "NEW" badge (shows badge only for the first 30 days):
+useEffect(() => {
+  const FEATURE_RELEASE_DATE = new Date('2025-10-30');
+  const DAYS_TO_SHOW_BADGE = 30;
+  
+  const daysSinceRelease = Math.floor(
+    (Date.now() - FEATURE_RELEASE_DATE.getTime()) / (1000 * 60 * 60 * 24)
+  );
+
+  if (daysSinceRelease <= DAYS_TO_SHOW_BADGE) {
+    const styleId = 'custom-sidenav-badges';
+    
+    if (!document.getElementById(styleId)) {
+      const style = document.createElement('style');
+      style.id = styleId;
+      style.textContent = `
+        a[href*="/a/${props.meta.id}/analytics"]::after {
+          content: "NEW (${DAYS_TO_SHOW_BADGE - daysSinceRelease} days)";
+          display: inline-block;
+          margin-left: 8px;
+          padding: 2px 6px;
+          font-size: 10px;
+          font-weight: 600;
+          background: #667eea;
+          color: white;
+          border-radius: 3px;
+        }
+      `;
+      document.head.appendChild(style);
+    }
+
+    return () => {
+      const existingStyle = document.getElementById(styleId);
+      if (existingStyle) {
+        document.head.removeChild(existingStyle);
+      }
+    };
+  }
+}, [props.meta.id]);
+Important Considerations
+Selector Fragility: CSS selectors targeting Grafana's sidenav may break with Grafana updates
+Theme Compatibility: Test with both light and dark themes
+Performance: Minimize complex CSS animations
+Accessibility: Ensure badges don't interfere with screen readers
+Multi-instance: Use plugin ID in selectors to avoid conflicts
+Testing Checklist
+[ ] Badge appears in sidenav
+[ ] Badge works in light theme
+[ ] Badge works in dark theme
+[ ] Badge doesn't break navigation
+[ ] Animation performs smoothly
+[ ] Badge is removed on component unmount
+[ ] No console errors
+[ ] Works across different Grafana versions
+This solution provides maximum flexibility for customizing your sidenav appearance while maintaining compatibility with Grafana Scenes!
