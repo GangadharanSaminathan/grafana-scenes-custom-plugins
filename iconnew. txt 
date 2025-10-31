@@ -1,0 +1,280 @@
+Ah! You want to add a drilldown indicator in the side navigation menu itself! Here's how to add custom indicators/icons to Grafana's sidenav:
+1. Custom CSS for Sidenav Icon Indicator
+Create a CSS file in your plugin to style the sidenav items:
+/* styles/sidenav-indicator.css */
+
+/* Add indicator to sidenav items */
+.sidemenu-item[data-has-drilldown="true"]::after,
+nav[aria-label="Primary"] a[href*="your-plugin-id"]::after {
+  content: '';
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 6px;
+  background-color: #ff6b6b;
+  border-radius: 50%;
+  animation: pulse 2s infinite;
+}
+
+/* Chevron/arrow indicator */
+.sidemenu-item-drilldown::before {
+  content: '›';
+  position: absolute;
+  right: 16px;
+  font-size: 18px;
+  color: rgba(255, 255, 255, 0.5);
+  transition: all 0.2s;
+}
+
+.sidemenu-item-drilldown:hover::before {
+  right: 12px;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+/* Icon styling similar to css-1d3xu67-Icon */
+.css-1d3xu67-Icon.sidenav-indicator {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  opacity: 0.7;
+}
+
+.css-1d3xu67-Icon.sidenav-indicator svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+
+/* Pulse animation for new/notification indicator */
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+2. Add Custom Navigation with Indicators (App Plugin)
+// module.ts or plugin entry file
+import { AppPlugin, AppRootProps } from '@grafana/data';
+import { Icon } from '@grafana/ui';
+import React, { useEffect } from 'react';
+import './styles/sidenav-indicator.css';
+
+// Root component that modifies sidenav
+const AppRoot: React.FC<AppRootProps> = ({ meta, ...props }) => {
+  useEffect(() => {
+    // Add indicators to sidenav items dynamically
+    const addNavIndicators = () => {
+      const navLinks = document.querySelectorAll(`a[href*="${meta.id}"]`);
+      
+      navLinks.forEach((link) => {
+        // Add custom class for styling
+        link.classList.add('sidemenu-item-drilldown');
+        
+        // Add custom indicator element
+        if (!link.querySelector('.sidenav-indicator')) {
+          const indicator = document.createElement('span');
+          indicator.className = 'css-1d3xu67-Icon sidenav-indicator';
+          indicator.innerHTML = `
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
+              <path d="M5 3l4 4-4 4" stroke="currentColor" stroke-width="2" fill="none"/>
+            </svg>
+          `;
+          link.appendChild(indicator);
+        }
+      });
+    };
+
+    // Run on mount and when navigation changes
+    addNavIndicators();
+    const observer = new MutationObserver(addNavIndicators);
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    return () => observer.disconnect();
+  }, [meta.id]);
+
+  return <YourMainComponent {...props} />;
+};
+
+export const plugin = new AppPlugin<{}>().setRootPage(AppRoot);
+3. Using Grafana's Navigation API (Scenes App)
+import { SceneApp, SceneAppPage } from '@grafana/scenes';
+import { Icon } from '@grafana/ui';
+import { css } from '@emotion/css';
+
+const navIndicatorStyle = css`
+  margin-left: auto;
+  opacity: 0.6;
+  transition: opacity 0.2s;
+  
+  &:hover {
+    opacity: 1;
+  }
+`;
+
+export function getAppScene() {
+  return new SceneApp({
+    pages: [
+      new SceneAppPage({
+        title: 'Dashboard',
+        url: '/a/your-plugin-id/dashboard',
+        // Custom tab rendering with indicator
+        tabSuffix: () => (
+          <span className={css`${navIndicatorStyle} css-1d3xu67-Icon`}>
+            <Icon name="angle-right" size="sm" />
+          </span>
+        ),
+        getScene: () => {
+          // Your scene content
+        },
+      }),
+      new SceneAppPage({
+        title: 'Analytics',
+        url: '/a/your-plugin-id/analytics',
+        // Add notification badge
+        tabSuffix: () => (
+          <span className={css`
+            background: #f44336;
+            color: white;
+            border-radius: 10px;
+            padding: 2px 6px;
+            font-size: 10px;
+            margin-left: 8px;
+          `}>
+            New
+          </span>
+        ),
+        getScene: () => {
+          // Your scene content
+        },
+      }),
+    ],
+  });
+}
+4. Inject SVG Indicator Directly
+// utils/navIndicator.ts
+export const addSidenavIndicators = (pluginId: string) => {
+  const style = document.createElement('style');
+  style.textContent = `
+    a[href*="${pluginId}"] {
+      position: relative;
+    }
+    
+    a[href*="${pluginId}"]::after {
+      content: '';
+      position: absolute;
+      right: 16px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 16px;
+      height: 16px;
+      background-image: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" stroke="%23fff" stroke-width="2" fill="none" opacity="0.6"/></svg>');
+      background-repeat: no-repeat;
+      background-position: center;
+    }
+    
+    a[href*="${pluginId}"]:hover::after {
+      opacity: 1;
+    }
+  `;
+  document.head.appendChild(style);
+};
+
+// In your plugin initialization
+import { addSidenavIndicators } from './utils/navIndicator';
+
+export const plugin = new AppPlugin<{}>()
+  .setRootPage((props) => {
+    // Add indicators when app loads
+    addSidenavIndicators(props.meta.id);
+    return <YourApp {...props} />;
+  });
+5. Badge/Dot Indicator (Notification Style)
+// Add notification dot to sidenav
+useEffect(() => {
+  const addNotificationDot = () => {
+    const navLink = document.querySelector(`a[href="/a/${meta.id}"]`);
+    if (navLink && !navLink.querySelector('.notification-dot')) {
+      const dot = document.createElement('span');
+      dot.className = 'notification-dot';
+      dot.style.cssText = `
+        position: absolute;
+        top: 12px;
+        right: 12px;
+        width: 8px;
+        height: 8px;
+        background: #ff4444;
+        border-radius: 50%;
+        border: 2px solid #1e1e1e;
+        animation: pulse 2s infinite;
+      `;
+      navLink.style.position = 'relative';
+      navLink.appendChild(dot);
+    }
+  };
+
+  setTimeout(addNotificationDot, 100);
+}, [meta.id]);
+6. Complete Example with Multiple Indicators
+// plugin.tsx
+import React, { useEffect } from 'react';
+import { AppRootProps } from '@grafana/data';
+import './styles/sidenav.css';
+
+export const App: React.FC<AppRootProps> = ({ meta }) => {
+  useEffect(() => {
+    const styleSheet = `
+      /* Drilldown chevron */
+      nav a[href*="${meta.id}"][data-page="dashboard"]::after {
+        content: '›';
+        position: absolute;
+        right: 16px;
+        font-size: 20px;
+        color: rgba(255, 255, 255, 0.5);
+      }
+      
+      /* New badge */
+      nav a[href*="${meta.id}"][data-page="new-feature"]::before {
+        content: 'NEW';
+        position: absolute;
+        right: 16px;
+        background: #ff6b6b;
+        color: white;
+        font-size: 9px;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-weight: 600;
+      }
+      
+      /* Dot indicator */
+      nav a[href*="${meta.id}"][data-has-updates="true"]::after {
+        content: '';
+        position: absolute;
+        right: 16px;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 6px;
+        height: 6px;
+        background: #4caf50;
+        border-radius: 50%;
+      }
+    `;
+    
+    const style = document.createElement('style');
+    style.textContent = styleSheet;
+    document.head.appendChild(style);
+    
+    return () => style.remove();
+  }, [meta.id]);
+
+  return <YourMainComponent />;
+};
+Which type of indicator do you need?
+Chevron/arrow (drilldown)
+Dot/badge (notification)
+"New" label
+Custom SVG icon
+Let me know and I can provide more specific code for your exact use case!
